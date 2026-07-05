@@ -1,346 +1,322 @@
-# agentTeams 实施方案
+# agentTeams 方案
 
-> 版本：v2.0（按「一支队伍的生命周期」主线重写）
+> 版本：v3.0（围绕三大支柱从头重构；docs 参考文档仅作输入，不照抄任何参考项目）
 > 日期：2026-07-05
-> 状态：实施规划稿
-> 上游：[myteams-草案.md](./myteams-草案.md)；选型依据与参考项目对照见附录 B
 
 ---
 
-## 0. 一句话与一条主线
+## 0. 三个诉求，三大支柱
 
-**agentTeams 做一件事：让你养一支（然后是多支）长期存在的专业 Agent 团队，把事从想法做到成品，并且一次比一次做得好。**
+agentTeams 要满足的三件事，直接决定系统的三大支柱：
 
-整个系统围绕**一支队伍的生命周期**设计，五步闭环：
+| 诉求 | 支柱 | 系统必须回答的问题 |
+|------|------|------------------|
+| 多个专业团队，各干各的领域（短剧、小说、应用开发……） | **支柱一：团队是平台的一等对象** | 平台如何做到"懂团队"但"不懂领域"？ |
+| 每个团队按自己的工作内容，用适合自己的方式 | **支柱二：工作方式属于团队，不属于平台** | 平台提供什么、团队定义什么，边界画在哪？ |
+| 团队长期存在，可以自主进化 | **支柱三：经验是资产，进化是机制** | 团队怎么"记住"、怎么"变好"、边界谁管？ |
+
+一句话架构观：**平台是"团队的宿舍与操场"——提供住所（持久化）、场地（协作现场）、校规（安全边界）；每支队自带教练（工作方式）和成长日记（记忆）。** 平台代码里不出现"短剧""小说""应用开发"任何领域词——这是支柱一成立的检验标准。
+
+---
+
+## 1. 支柱一：团队是一等对象
+
+### 1.1 概念模型
 
 ```text
-① 建队 ──→ ② 接活 ──→ ③ 干活 ──→ ④ 交付 ──→ ⑤ 变聪明
-（章程+成员）（项目+现场）（推进+叫人）（产物+拍板）（沉淀→记忆）
-     ▲                                              │
-     └────────── 下一个活，队伍带着记忆回到 ② ─────────┘
+平台
+ └── Team ×N（长期存在，可归档不可"用完即弃"）
+      ├── 身份：名字、领域简介、成立时间、履历
+      ├── 成员 Member ×N：Agent 或人，各有 @handle、岗位、执行引擎
+      ├── 队规 Playbook：本队工作方式的唯一定义（支柱二）
+      ├── 作品 Work ×N：团队做过/在做的每一件事
+      │     └── 现场 Room ×N：围绕作品的协作空间（时间线）
+      └── 队史 Legacy：记忆 + 复盘档案（支柱三）
 ```
 
-每个技术组件都为主线上的某一步服务，不为步骤服务的东西不做。本文第 2 章先用一个真实场景把五步走一遍，第 3 章逐步给出每一步的设计与实现，第 4 章是实施排期。
+关键立场：
 
----
+- **Team ≠ 一次会话**。会话是消耗品，团队是资产。所有状态落盘（SQLite + 文件区），进程重启、机器重启，队伍还在。
+- **人是普通成员**。人有 @handle、可被交办事项；人和 Agent 的区别只是"执行引擎不同"（人 = 通知收件箱）。
+- **成员绑定引擎而非平台绑定引擎**：`@编剧 → pi`、`@评审 → claude`，同队可混用。平台通过统一的引擎接口调用，不感知引擎差异。
 
-## 1. 边界（先说不做什么）
+### 1.2 多队并存的含义
 
-- ❌ 不做一次性多 Agent 会话工具（队伍是持久对象，不是 session）
-- ❌ 不做通用 Workflow DAG 平台（流程属于队伍自己，平台只给容器）
-- ❌ 不自建 LLM 调用层（执行一律交给现成 Harness：Pi、codex、claude 等）
-- ❌ 不复刻任何参考项目全栈（借鉴点逐条列在附录 B，均为裁剪后自研）
-- ❌ 第一版不做：云端多租户、外部 IM 桥、多队模板市场
+- 三支队 = 三份数据 + 三份队规 + 三份队史，**共享同一套平台代码**。
+- 建第二支队不需要平台发版——只需要一份新队规。这是"平台不懂领域"的直接推论。
+- Hub 首页即"我的队伍们"：每队一张卡片（在做什么、卡在哪、等我拍什么板）。
 
----
-
-## 2. 主线走一遍：app-dev 队做一个真实需求
-
-以下场景是 Phase 1 的**端到端验收用例**，也是理解全部设计的入口。
-
-**① 建队**（一次性，之后长期存在）
-
-```bash
-agentteams team create --template app-dev --name 应用一队
-```
-
-得到一支队：3 个 Agent 成员（@pm 产品、@builder 开发、@reviewer 评审）+ 你自己（@owner，人也是成员）。队伍自带一份**章程（Charter）**：本队的阶段怎么走（默认：头脑风暴→定案→实施）、什么事必须叫人、哪些规矩队伍自己能改。
-
-**② 接活**
-
-```bash
-agentteams post 应用一队 "@pm 做一个命令行番茄钟，要能统计每日专注时长"
-```
-
-系统创建一个 Project（作品）和第一个 Thread（协作现场），处于本队定义的第一阶段 `brainstorm`。Hub 上能看到：这支队正在做什么、处于哪个阶段。
-
-**③ 干活**（主循环，无人值守推进）
-
-- @pm 被唤起（平台把「你是谁、队友是谁、当前阶段目标、团队记忆摘要」注入 prompt，然后交给 Pi 执行），产出需求澄清和两个方案，行首 `@builder` 交棒；
-- **谁被 @ 谁持球**：任何时刻 Thread 有唯一责任人，卡住了状态会亮红，不会无声挂死；
-- 每个成员的输出必须以三选一收尾：**@队友交棒 / hold 等外部条件 / escalate 叫人**——这是平台强制的推进协议，防止聊天空转；
-- 阶段迁移受门禁约束：`brainstorm → plan` 由 @pm 确认方案备选后触发；`plan → execute` 的门禁是 **human**——自动生成一份决策包（Decision Packet）进你的拍板箱。
-
-**④ 交付**
-
-你在 Hub 拍板定案后，@builder 在隔离 workspace 写码提交产物（PR + 测试报告），@reviewer 评审（规则：评审者与实现者不得是同一成员）。产物挂在时间线上，验收不过可回退到 plan 阶段重来。
-
-**⑤ 变聪明**
-
-Thread 关闭前强制走一次结构化收尾（closeout）：什么管用、什么翻车、候选惯例。蒸馏后写入团队记忆三个文件：`principles.md`（原则）/ `patterns.md`（模式）/ `scars.md`（伤疤）。**下一个需求进来时，③ 的 prompt 注入会自动带上这些记忆**——第二次做同类任务，队伍表现可感知地不同。这就是「养」的含义。
-
-多队 = 重复①，但换一份 Charter：短剧队可以定义 5 个阶段并按「集」循环，平台零改动。
-
----
-
-## 3. 五步的设计与实现
-
-### 3.0 平台底座（支撑所有步骤的最小内核）
-
-单进程本地守护 `agentteams hub`（Node ≥ 22，TypeScript monorepo）：
+### 1.3 数据骨架（完整 schema 见附录 A）
 
 ```text
-agentteams hub
-  ├── SQLite（~/.agentteams/agentteams.db，唯一权威状态）
-  ├── HTTP + WebSocket（Hub UI，127.0.0.1:7100）
-  ├── MCP Server（Agent 干活时回调平台的唯一通道）
-  └── DeliveryWorker（执行队列消费者，调 Harness）
+teams / members / works / rooms / entries（时间线，append-only）
++ 每队一个文件区 ~/.agentteams/teams/<id>/（playbook.md、memory/、archive/，git 管理）
 ```
-
-原则：**无 Redis/Postgres、无微服务**；崩溃恢复 = 重启后按 SQLite 状态重新调度。包结构：
-
-```text
-packages/
-  shared/    # Zod schema + migration（单一真相源）
-  phases/    # 步骤①：phase 状态机
-  custody/   # 步骤③：持球状态机
-  router/    # 步骤③：@ 解析 + 串行推进循环
-  delivery/  # 步骤③：执行队列 + worker
-  engines/   # 步骤③：EngineAdapter（pi / acpx）
-  memory/    # 步骤⑤：记忆读写与蒸馏
-  hub/       # 装配 + HTTP/WS + MCP
-  ui/ cli/
-```
-
-### 3.1 步骤①：建队 —— Team、Member、Charter
-
-**Team 是一等持久对象**（不是 session）：
-
-```sql
-teams(id, name, domain, charter_json, created_at, archived_at)
-members(id, team_id, handle, role, engine, engine_config_json, is_human)
-```
-
-- Member 绑定执行引擎（`pi` / `acpx:codex` / `acpx:claude`…），**人也是 Member**（可被 @，被 @ 到即产生待办）。
-- **Charter 是队伍的宪法**，也是「每队工作方式不同」的唯一载体——平台不硬编码任何流程：
-
-```jsonc
-{
-  "phases": [                          // 本队自定义的阶段状态机（段数不限、可回退、可循环）
-    { "id": "brainstorm", "participants": ["@pm"], "exit_criteria": "...", "next": ["plan"] },
-    { "id": "plan",       "gate": { "type": "human" }, "next": ["execute", "brainstorm"] },
-    { "id": "execute",    "rules": ["实现者≠评审者"], "gate": { "type": "artifact-exists" }, "next": ["done", "plan"] },
-    { "id": "done", "terminal": true }
-  ],
-  "cycles": { "enabled": false, "unit": "集" },   // 循环创作队开启：每集独立走一遍 phases
-  "autonomy": { "default": "L2", "L3_requires_human": ["对外发布", "合并 main"] },
-  "evolution": {                       // 步骤⑤的进化边界
-    "self_editable": ["memory/*", "phases[*].description", "phases[*].exit_criteria"],
-    "human_approval": ["autonomy.*", "phases[*].gate", "phases[*].next", "members"]
-  },
-  "max_a2a_depth": 10
-}
-```
-
-- 阶段迁移由 MCP `advance_phase`/`revert_phase` 或人触发，受 `gate` 约束（human / artifact-exists / 谓词），全部落 append-only 的 `phase_events` 日志。
-- Charter 双轨存储：DB JSON 为机器真相源，同时导出 `CHARTER.md` 供 Agent 阅读。
-- 模板（`templates/app-dev/`）= 一份 Charter + 成员岗位 prompt，建第二支队就是换模板。
-
-### 3.2 步骤②：接活 —— Project、Cycle、Thread
-
-```sql
-projects(id, team_id, title, phase, status)      -- phase 合法值由 charter 校验
-cycles(id, project_id, title, phase, status)     -- 可选子周期：第 N 集/章/迭代
-threads(id, project_id, cycle_id, title, phase, status)
-messages(id, thread_id, author_member_id, kind, body_md, artifact_path, seq)
-```
-
-- Project = 作品（一个应用、一部短剧）；Thread = 协作现场，**append-only 时间线**（kind：chat / artifact / decision / closeout / system；seq 单调递增供 UI 增量同步）。
-- 循环创作队开启 cycles 后，每个 Cycle 独立走一遍 phase 状态机。
-
-### 3.3 步骤③：干活 —— 推进协议（本方案的技术核心）
-
-干活的本质是回答一个问题：**多个 Agent 无人值守协作时，怎么保证「事永远在被推进、卡住必被发现」？** 答案由四个环环相扣的机制组成：
-
-**(a) @ 路由 = 交棒**（`router/mentions.ts`，自研）
-
-只有**行首** `@handle` 触发交棒（正文中的 @ 只是提及）；剥离代码块后解析；过滤自 @；单消息最多 2 个目标；链深上限取 charter（默认 10，防死循环）。
-
-**(b) 持球状态机 = 责任归属**（`custody/`，表驱动纯函数，零 IO）
-
-```text
-状态（5）: new → active ⇄ blocked → resolved；active → dead（崩溃，可复活）
-事件（8）: custody.handed / custody.held / custody.hold_expired /
-          invoke.started / invoke.died / thread.blocked / thread.unblocked / thread.done
-```
-
-任何时刻 Thread 有唯一持球人；`transition(state, event)` 的 5×8=40 组合穷举测试；事件写 `custody_events`（append-only），投影到 `custody_projections` 供 UI 读。并发写保护：per-thread promise chain 串行化。
-
-**(c) 三选一收尾协议 = 强制推进**
-
-每次成员输出必须以其一结束：行首 @ 交棒 / MCP `hold_thread`（定时或条件唤醒）/ MCP `escalate`（叫人）。route-serial 循环（自研，≤600 行）检测到「无路由输出」→ 记 held + 定时提醒；连续两次违约自动转 escalation。这是防「聊天空转」的关键设计。
-
-**(d) 执行 = 队列 + 引擎适配**
-
-```sql
-delivery_jobs(id, thread_id, target_member_id, prompt_md, status,
-              idempotency_key, source, depth, attempt, ...)
-```
-
-- worker 消费队列（并发上限 4，指数退避重试，blocked 持久化）；幂等键防重复投递。
-- 每次唤起的 prompt 组装（~300 token）：`[你是谁+队友] [当前阶段目标/产物/门禁] [持球规则+三选一] [团队记忆摘要] [MCP 工具]`。
-- **EngineAdapter** 隔离 Harness 差异：
-
-```typescript
-interface EngineAdapter {
-  invoke(req: { member, prompt, cwd, sessionKey, mcp, signal }): AsyncIterable<EngineEvent>;
-}
-```
-
-首发 `pi`（spawn `pi --mode rpc`，能力最全）与 `acpx`（一个适配器覆盖 codex/claude 等 20+ agent）。session 以 `(engine, cwd, member+project)` 续接；execute 阶段可用 git worktree 隔离 workspace。
-
-**Agent 回调平台的唯一通道是 MCP 工具面**：`get_thread / post_message / post_artifact / hold_thread / escalate / advance_phase / revert_phase / read_memory / close_out`。
-
-### 3.4 步骤④：交付 —— 产物、拍板、Hub
-
-- **产物**：`post_artifact`（文件 + 描述）挂时间线，kind=artifact 分色展示。
-- **拍板**：`escalations(id, team_id, thread_id, reason, packet_md, status, decision_md)`——human gate、超自治边界操作、冲突升级都汇成 Decision Packet 进拍板箱；人决定后 `thread.unblocked` 继续推进。
-- **Hub UI**（React 单页，WebSocket 增量）四个视图，对应人旁观/介入的四种需要：
-  1. 队列表：各队在做什么、处于哪个阶段
-  2. Thread 现场：时间线 + 持球状态条（谁持球/为何 blocked）+ 阶段进度
-  3. 拍板箱：pending escalations + 决定输入
-  4. 插话框：人随时 @ 任意成员
-
-### 3.5 步骤⑤：变聪明 —— Closeout → 记忆 → 注入
-
-进化闭环三段：
-
-1. **收尾**：`thread.done` 前强制 `close_out({ what_worked, what_failed, artifacts, candidate_conventions })`。
-2. **蒸馏**：MemoryDistiller（一个由 charter 指定成员执行的内置 job）把 signal≥2 的条目合并进 `memory/principles.md / patterns.md / scars.md`；记忆目录是 git repo——每次变更一个 commit，可回滚、可审计，防记忆污染。
-3. **注入**：下次唤起时 `[团队记忆摘要]` 段自动带上（≤10 条检索）。
-
-进化受 Charter 边界约束：`self_editable` 内的（记忆、阶段描述、完成判据）队伍自己改；`human_approval` 内的（自治等级、门禁、阶段结构、成员）自动转拍板箱。**进化 = 记忆沉淀 + 章程受控微调**，不是让 Agent 改平台代码。
 
 ---
 
-## 4. 实施排期（每阶段以主线可走通的程度验收）
+## 2. 支柱二：工作方式属于团队
 
-### Phase 0：底座 + 三个状态机（约 1 周）
+### 2.1 边界怎么画：平台给"物理"，团队给"玩法"
 
-| # | 任务 | 验收 |
-|---|------|------|
-| 0.1 | monorepo（pnpm + Biome + Vitest + CI）+ shared schema/migration | build/test 绿 |
-| 0.2 | `custody`：状态机 + 40 组合穷举 + 事件日志/投影 | 全绿 |
-| 0.3 | `phases`：charter 校验 + advance/revert + gate 钩子 + phase_events | 非法迁移拒绝、回退/循环用例全绿 |
-| 0.4 | `router/mentions`：行首 @/代码块/自@/深度用例 | 全绿 |
+| 平台提供（对所有队相同） | 团队定义（每队不同，写在队规里） |
+|------------------------|--------------------------------|
+| 阶段容器与迁移机制 | 有哪几个阶段、叫什么、什么顺序、能否回退/循环 |
+| 交棒机制（@ 即交办） | 谁在什么阶段干什么、交给谁 |
+| 责任追踪（任一时刻现场有唯一负责人） | 负责人卡住多久算异常、找谁 |
+| 叫人机制（升级给人拍板） | 什么事必须叫人（发布？花钱？定稿？） |
+| 产物挂载与时间线 | 每阶段要交出什么产物、什么算合格 |
+| 记忆读写通道 | 记什么、什么经验够格入库 |
 
-### Phase 1：主线五步走通一遍（约 3–4 周）＝ 第 2 章场景全流程
+### 2.2 队规（Playbook）
 
-| # | 任务（对应主线步骤） | 验收 |
-|---|------|------|
-| 1.1 | ①：team/member/charter CRUD + app-dev 模板 | `team create --template app-dev` |
-| 1.2 | ③：pi-rpc 适配器（invoke/续接/abort） | 真实 pi 集成测试 |
-| 1.3 | ③：delivery 队列 + route-serial + 三选一违约处理 | 两个 mock 成员 A2A 链跑通 |
-| 1.4 | ③④：MCP 工具面 9 个工具 | conformance 用例 |
-| 1.5 | ④：Hub 四视图 + WebSocket 增量 | 人工走查 |
-| 1.6 | ⑤：closeout → 蒸馏 → 注入 | **黄金用例：第二次同类任务 prompt 含上次沉淀** |
-| 1.7 | **端到端**：第 2 章番茄钟场景完整走完五步 | 产出可运行交付物 + 记忆写回 |
+队规是一份**结构化文档 + 可执行约束**的混合体，每队一份：
 
-明确不做：第二支队模板、并行路由、跨 thread、外部 IM。Cycle schema 先落地，UI 随 Phase 2。
+```yaml
+# ~/.agentteams/teams/<id>/playbook.yaml —— 以短剧队为例（应用开发队/小说队结构相同、内容全异）
+rhythm:                        # 本队阶段状态机：段数、名称、顺序全部自定义
+  - id: 选题
+    who: [@策划, @制片人]
+    deliver: [题材一页纸, 对标分析]
+    done_when: "制片人确认题材"
+  - id: 剧本
+    who: [@编剧, @策划]
+    deliver: [分集大纲, 每集剧本]
+    gate: human              # 剧本定稿必须人拍板
+    next: [拍摄脚本, 选题]     # 可回退重新选题
+  - id: 拍摄脚本
+    who: [@分镜, @编剧]
+    deliver: [分镜表, 场景清单]
+    next: [done]
+loop: 集                       # 本队按「集」循环：每集独立走一遍 rhythm
+must_ask_human: [对外发布, 预算变更, 剧本定稿]
+review_rule: "产出者与审核者不得为同一成员"
+memory_policy: "同类问题出现≥2次才写入惯例"
+```
 
-### Phase 2：验证「同平台、异工作方式」（约 2–3 周）
+- 平台只认识 yaml 里的**结构**（阶段、门禁、循环、必叫人清单），不认识"选题""剧本"这些词。
+- 应用开发队的队规可能是三段线性（风暴→定案→实施）；小说队可能按"章"循环且多一个"世界观"常驻阶段——**同一平台，零改动**。
+- 队规双形态：yaml 是机器执行的真相源，同时渲染成 `playbook.md` 供成员在干活时阅读。
 
-- acpx 适配器（跨引擎互审生效）；并行路由（brainstorm 发散）
-- **短剧/小说队模板**：不同段数 + Cycle 循环，**平台零改动**为验收标准
-- 跨 thread 工具；custody 是否加 parked 态评估
+### 2.3 干活的通用协议（平台唯一强制的"物理定律"）
 
-### Phase 3：重流程与现场定制（约 3–4 周）
+无论哪支队，现场推进只有一个协议，防止无人值守时空转或无声挂死：
 
-- WorkflowRun 轻量 DAG（ai/bash/gate 节点，步骤级审批重试）——给需要强流程的队
-- worktree 隔离默认化；Hub 现场布局由 charter 驱动（开发队看 diff、短剧队看分集表）
+1. **@ 即交办**：消息行首 `@handle` = 把球交给他；任一时刻现场有唯一持球人。
+2. **三选一收尾**：每次成员产出必须以其一结束——`@下一位`（交棒）/ `稍后再来`（定时或条件唤醒）/ `请人拍板`（进拍板箱）。违反两次自动升级给人。
+3. **持球状态可见**：现场状态 = 新建/推进中/卡住/完结/中断，卡住的现场在 Hub 上亮红。
+4. **阶段迁移走门禁**：按队规的 `next` 与 `gate` 检查（人拍板 / 产物齐备 / 自定判据），迁移事件全部留痕。
 
-### Phase 4：生态硬化（持续）
+这四条是平台层的、领域无关的；其余一切规矩来自队规。
 
-- HTTP callback 桥、成本看板、skills 同步器、IM 桥、event-log 可换后端
+### 2.4 成员被唤起时看到什么
+
+每次执行前，平台拼一段简短的"上工简报"交给成员的引擎：
+
+```text
+你是〈短剧一队〉的 @编剧（岗位职责…）。队友：@策划(…) @分镜(…) 人类：@老板。
+当前作品《xxx》第 3 集，处于「剧本」阶段——本阶段要交出：分集大纲、每集剧本；定稿须人拍板。
+你现在持球。收尾三选一：@队友交棒 / 稍后再来 / 请人拍板。
+队里的惯例（来自队史，节选）：… 
+可用工具：查看现场 / 发消息 / 挂产物 / 请人拍板 / 稍后再来 / 迁移阶段 / 查队史 / 复盘
+```
+
+引擎无关：这段简报 + 工具面（MCP）就是成员与平台的全部接口，Pi、claude、codex 一视同仁。
 
 ---
 
-## 5. 风险与对策
+## 3. 支柱三：长期存在与自主进化
+
+### 3.1 进化的定义（先收窄，才可实现）
+
+"自主进化"不是 Agent 改代码，而是三件具体的事：
+
+1. **记得住**：每个作品收尾时强制复盘，经验入队史；
+2. **用得上**：下次干活时，相关经验自动出现在上工简报里；
+3. **改得动**：团队可以在授权范围内修改自己的队规。
+
+### 3.2 记忆机制
+
+```text
+现场完结前 → 强制复盘（结构化）：什么管用 / 什么翻车 / 建议成为惯例的做法
+     ↓
+蒸馏（由队规指定的成员执行，如 @制片人）：
+  同类信号 ≥2 次才入库，写入队史三件套
+     memory/principles.md   # 原则：本队做事底线
+     memory/patterns.md     # 打法：验证过管用的做法
+     memory/scars.md        # 伤疤：踩过的坑与规避法
+     ↓
+队史目录是 git 仓库：每次变更一个 commit —— 可回滚、可审计、防污染
+     ↓
+下次唤起：按当前阶段/任务检索 ≤10 条，注入上工简报
+```
+
+验收标准（黄金用例）：**同一支队第二次做同类任务时，上工简报里可见上次的沉淀，且行为可感知地不同。**
+
+### 3.3 进化边界（自治的安全阀）
+
+队规里的 `evolution` 段划定两级权限：
+
+| 级别 | 内容 | 谁批 |
+|------|------|------|
+| 队伍自改 | 队史全部、阶段的描述/产物清单/完成判据 | 无需批准，git 留痕 |
+| 须人批准 | 阶段增删与顺序、门禁、必叫人清单、成员进出、自治等级 | 自动生成提案进拍板箱 |
+
+即：**战术自由，宪法修正案要公投。** 团队想改自己的结构，走的是"提案→人拍板→生效"，而不是静默生效。
+
+### 3.4 长期存在的工程含义
+
+- 一切状态可恢复：SQLite（结构化状态）+ 文件区（队规/队史/产物），进程只是执行器。
+- 现场时间线 append-only：历史不可篡改，队史蒸馏永远有原始出处可溯。
+- 归档而非删除：解散的队伍归档保留全部履历，可复活。
+
+---
+
+## 4. 系统架构（把三大支柱落到最小实现）
+
+### 4.1 拓扑：一个守护进程 + 一套工具面
+
+```text
+agentteams hub（单 Node 进程，本地优先）
+ ├── SQLite  ~/.agentteams/agentteams.db      # 唯一权威结构化状态
+ ├── 文件区  ~/.agentteams/teams/<id>/         # 队规 / 队史(git) / 产物
+ ├── Web UI（HTTP+WS, 127.0.0.1:7100）         # Hub：队伍卡片/现场/拍板箱
+ ├── MCP 工具面                                 # 成员回调平台的唯一通道
+ └── 执行器  Dispatcher + EngineAdapter         # 队列化调用 pi / claude / codex…
+```
+
+- **零外部服务依赖**（无 Redis/Postgres/消息队列），单人可维护；崩溃恢复 = 重启后按 DB 状态续跑。
+- 技术栈：TypeScript monorepo（pnpm）、Zod schema、better-sqlite3、Fastify + ws、React 单页、Vitest。
+
+### 4.2 模块与支柱对应
+
+| 模块 | 服务的支柱 | 内容 |
+|------|-----------|------|
+| `core/teams` | 一 | Team/Member/Work/Room 持久化与生命周期 |
+| `core/playbook` | 二 | 队规解析校验、阶段状态机、门禁钩子、迁移事件 |
+| `core/relay` | 二 | @ 解析（仅行首、剥代码块、防自@、链深上限）+ 持球状态机 + 三选一协议兜底 |
+| `core/dispatch` | 二 | 执行队列（幂等键、重试退避、并发上限、卡住持久化） |
+| `core/engines` | 二 | EngineAdapter 接口 + pi 适配器（首发）+ acpx 适配器（次发，一次覆盖 20+ 引擎） |
+| `core/legacy` | 三 | 复盘收集、蒸馏、检索注入、进化提案 |
+| `hub` / `ui` / `cli` | 全部 | 装配、界面、命令行 |
+
+持球状态机刻意极简：5 个状态（新建/推进中/卡住/完结/中断）× 8 个事件，表驱动纯函数 + 全组合穷举测试；@ 解析与推进循环同样自研小实现（目标 ≤600 行），**不引入任何参考项目的代码**。
+
+### 4.3 MCP 工具面（成员视角的全部平台能力）
+
+`查看现场 get_room` / `发消息 post`（行首 @ 即交办）/ `挂产物 attach` / `稍后再来 snooze` / `请人拍板 ask_human` / `迁移阶段 advance·revert`（受门禁）/ `查队史 recall` / `复盘 retro`。
+
+### 4.4 Hub UI（人视角的四件事）
+
+1. **我的队伍们**：每队卡片——在做什么/哪个阶段/是否卡住/等我拍什么板
+2. **现场**：时间线 + 持球条 + 阶段进度（布局参数来自队规，Phase 3 起每队可不同）
+3. **拍板箱**：决策包列表（背景/选项/建议/影响），一键定夺
+4. **插话**：人随时 @ 任何成员
+
+---
+
+## 5. 实施路线（每步验收 = 三支柱各前进一格）
+
+### M0 底座（约 1 周）
+monorepo + schema/migration + 持球状态机（穷举测试）+ 队规解析与阶段状态机（回退/循环/非法迁移用例）+ @ 解析。
+
+### M1 一支队活起来（约 3–4 周）——支柱一、二成立
+- pi 引擎适配器（invoke/会话续接/中止）
+- dispatch 队列 + 推进循环 + 三选一兜底
+- MCP 工具面（除 recall/retro 外全部）
+- 应用开发队模板（队规 + @pm/@builder/@reviewer 岗位）
+- Hub 四视图最小版 + CLI
+- **验收**：给应用开发队一个真实小需求（如命令行番茄钟），无人值守走完本队全部阶段，人只在门禁处拍板，产出可运行交付物。
+
+### M2 队伍变聪明（约 1–2 周）——支柱三成立
+- retro/recall + 蒸馏 + git 化队史 + 简报注入 + 进化提案流
+- **验收（黄金用例）**：同队第二个同类需求，简报含上次沉淀且行为可感知不同；队伍发起一次队规修改提案并经拍板生效。
+
+### M3 多队并存（约 2–3 周）——支柱一完全体
+- 短剧队或小说队模板（不同段数 + 按集/章循环）
+- **验收**：第二支队上线全程平台零代码改动；两队并行互不干扰。
+- acpx 适配器 → 同队混用引擎，评审规则（产出者≠审核者）跨引擎生效。
+
+### M4 增强（持续）
+每队自定义现场布局、并行讨论（风暴阶段多人同题发散）、跨现场协作、重流程模式（需要强流程的队可在队规中声明步骤级审批）、成本看板、外部 IM 桥。
+
+---
+
+## 6. 风险与对策
 
 | 风险 | 对策 |
 |------|------|
-| A2A 死循环/空转 | 链深上限 + 自 @ 过滤 + 幂等键 + 三选一协议 + 违约转 escalation |
-| Agent 不守协议 | route-serial 兜底检测 + probe 提醒 + 两次违约叫人 |
-| 长 thread 上下文爆炸 | 注入只带摘要（近 N 条全文 + 更早压缩），产物走文件引用 |
-| 记忆污染 | signal≥2 才入库 + 记忆 git 化可回滚 + 结构变更走拍板 |
-| Harness 契约漂移 | 适配器集成测试 pin 版本 + conformance 用例 |
-| 范围失控 | 硬约束见 §1；每 Phase 黄金用例不达标不进下一阶段 |
+| 无人值守空转/死循环 | 三选一协议 + 链深上限 + 自@过滤 + 幂等键 + 两次违约升级给人 |
+| 成员不守协议（引擎输出不可控） | 平台兜底：无收尾动作 → 记"卡住" + 定时提醒 + 升级 |
+| 记忆污染（错误经验入库） | 信号≥2 才入库 + git 可回滚 + 结构性变更走提案 |
+| 队规写坏（死锁的阶段图） | 加载时静态校验：可达性、终态存在、门禁合法 |
+| 上下文爆炸 | 简报只带摘要与 ≤10 条队史；产物走文件引用不进 prompt |
+| 引擎契约漂移 | 适配器 pin 版本 + 每引擎一套 conformance 用例 |
+| 范围失控 | 平台代码禁止出现领域词；新能力先问"服务哪根支柱" |
 
-## 6. 待拍板
+## 7. 待拍板
 
-1. Phase 1 样板队 = 应用开发队？（本方案按"是"）
-2. 进化边界默认值（§3.1 evolution）是否符合预期？
-3. 命名：`agentteams` vs `myteams`？
-4. 引擎顺序：先 pi-rpc 后 acpx（本方案），还是对调？
+1. 第一支样板队 = 应用开发队（可机器验收）？
+2. 进化边界默认划分（§3.3 两级）是否符合预期？
+3. 产品名：`agentteams` / `myteams`？
+4. M1 引擎先做 pi（能力全）后 acpx（覆盖广）——是否对调？
 
 ---
 
-## 附录 A：完整 SQLite Schema
+## 附录 A：SQLite Schema
 
 ```sql
-CREATE TABLE teams (id TEXT PRIMARY KEY, name TEXT NOT NULL, domain TEXT NOT NULL,
-  charter_json TEXT NOT NULL, created_at INTEGER, archived_at INTEGER);
-
-CREATE TABLE members (id TEXT PRIMARY KEY, team_id TEXT NOT NULL REFERENCES teams(id),
-  handle TEXT NOT NULL, display_name TEXT, role TEXT NOT NULL,
-  engine TEXT NOT NULL, engine_config_json TEXT, is_human INTEGER DEFAULT 0,
-  UNIQUE(team_id, handle));
-
-CREATE TABLE projects (id TEXT PRIMARY KEY, team_id TEXT NOT NULL,
-  title TEXT NOT NULL, phase TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active');
-
-CREATE TABLE cycles (id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
-  title TEXT NOT NULL, phase TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active');
-
+CREATE TABLE teams    (id TEXT PRIMARY KEY, name TEXT NOT NULL, domain_intro TEXT,
+                       created_at INTEGER, archived_at INTEGER);
+CREATE TABLE members  (id TEXT PRIMARY KEY, team_id TEXT NOT NULL,
+                       handle TEXT NOT NULL, role TEXT NOT NULL,
+                       engine TEXT NOT NULL, engine_config_json TEXT,
+                       is_human INTEGER DEFAULT 0, UNIQUE(team_id, handle));
+CREATE TABLE works    (id TEXT PRIMARY KEY, team_id TEXT NOT NULL, title TEXT NOT NULL,
+                       phase TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active');
+CREATE TABLE loops    (id TEXT PRIMARY KEY, work_id TEXT NOT NULL,   -- 循环单元：第N集/章
+                       title TEXT NOT NULL, phase TEXT NOT NULL,
+                       status TEXT NOT NULL DEFAULT 'active');
+CREATE TABLE rooms    (id TEXT PRIMARY KEY, work_id TEXT NOT NULL, loop_id TEXT,
+                       title TEXT, phase TEXT NOT NULL,
+                       status TEXT NOT NULL DEFAULT 'open');
+CREATE TABLE entries  (id TEXT PRIMARY KEY, room_id TEXT NOT NULL,   -- append-only 时间线
+                       author_member_id TEXT, kind TEXT NOT NULL,    -- chat|artifact|decision|retro|system
+                       body_md TEXT NOT NULL, artifact_path TEXT,
+                       seq INTEGER NOT NULL, created_at INTEGER);
+CREATE TABLE ball_events (id INTEGER PRIMARY KEY AUTOINCREMENT,      -- 持球事件日志
+                       room_id TEXT NOT NULL, type TEXT NOT NULL,
+                       payload_json TEXT, created_at INTEGER);
+CREATE TABLE ball_state (room_id TEXT PRIMARY KEY,                   -- 投影
+                       state TEXT NOT NULL,                          -- new|active|stuck|closed|dead
+                       holder_member_id TEXT, updated_at INTEGER);
 CREATE TABLE phase_events (id INTEGER PRIMARY KEY AUTOINCREMENT,
-  subject_key TEXT NOT NULL, type TEXT NOT NULL,           -- phase.advanced|reverted
-  from_phase TEXT, to_phase TEXT, gate_result_json TEXT,
-  actor_member_id TEXT, created_at INTEGER);
-
-CREATE TABLE threads (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, cycle_id TEXT,
-  title TEXT, phase TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open');
-
-CREATE TABLE messages (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL,
-  author_member_id TEXT, kind TEXT NOT NULL,               -- chat|artifact|decision|closeout|system
-  body_md TEXT NOT NULL, artifact_path TEXT, seq INTEGER NOT NULL, created_at INTEGER);
-
-CREATE TABLE custody_events (id INTEGER PRIMARY KEY AUTOINCREMENT,
-  subject_key TEXT NOT NULL, type TEXT NOT NULL, payload_json TEXT, created_at INTEGER);
-
-CREATE TABLE custody_projections (subject_key TEXT PRIMARY KEY,
-  state TEXT NOT NULL,                                     -- new|active|blocked|resolved|dead
-  holder_member_id TEXT, updated_at INTEGER);
-
-CREATE TABLE delivery_jobs (id TEXT PRIMARY KEY, thread_id TEXT NOT NULL,
-  target_member_id TEXT NOT NULL, prompt_md TEXT NOT NULL,
-  status TEXT NOT NULL,                                    -- queued|running|done|failed|blocked
-  idempotency_key TEXT UNIQUE, source TEXT NOT NULL,       -- user|a2a|workflow|wake
-  depth INTEGER DEFAULT 0, attempt INTEGER DEFAULT 0, last_error TEXT,
-  created_at INTEGER, started_at INTEGER, finished_at INTEGER);
-
-CREATE TABLE escalations (id TEXT PRIMARY KEY, team_id TEXT NOT NULL, thread_id TEXT,
-  reason TEXT NOT NULL,                                    -- irreversible|conflict|acceptance|charter
-  packet_md TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-  decision_md TEXT, decided_at INTEGER);
+                       subject_key TEXT NOT NULL, type TEXT NOT NULL, -- advanced|reverted
+                       from_phase TEXT, to_phase TEXT, gate_result_json TEXT,
+                       actor_member_id TEXT, created_at INTEGER);
+CREATE TABLE jobs     (id TEXT PRIMARY KEY, room_id TEXT NOT NULL,
+                       target_member_id TEXT NOT NULL, brief_md TEXT NOT NULL,
+                       status TEXT NOT NULL,                         -- queued|running|done|failed|stuck
+                       idempotency_key TEXT UNIQUE, depth INTEGER DEFAULT 0,
+                       attempt INTEGER DEFAULT 0, last_error TEXT,
+                       created_at INTEGER, started_at INTEGER, finished_at INTEGER);
+CREATE TABLE decisions (id TEXT PRIMARY KEY, team_id TEXT NOT NULL, room_id TEXT,
+                       reason TEXT NOT NULL,                         -- gate|boundary|conflict|proposal
+                       packet_md TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+                       decision_md TEXT, decided_at INTEGER);
 ```
 
-## 附录 B：参考项目借鉴对照（均为裁剪后自研，不 fork）
+## 附录 B：与 docs 参考文档的关系（只取问题的答案，不取实现）
 
-| 本方案设计 | 借鉴来源 | 说明 |
-|-----------|---------|------|
-| 持球状态机（5 态×8 事件） | Clowder（MIT） | 从 8 态×17 事件裁剪；不搬 Redis EventLog |
-| @ 路由语义、三选一协议 | Clowder / Multica | mentions 自研，测试用例对齐 |
-| route-serial 推进循环 | Clowder | 自研 ≤600 行（原 3657 行） |
-| delivery 队列/重试/blocked | Symphony | blocked 改为持久化（修正其内存态缺陷） |
-| 单守护进程 + WS 时间线 + seq | Paseo | — |
-| MCP=编排 API + Skills=说明书 | Paseo / mcp-skills 分析 | — |
-| EngineAdapter / 多引擎 | acpx / Paseo Provider | acpx 一个适配器覆盖 20+ agent |
-| Autonomy L0–L3、Closeout、记忆三文件 | OpenCrew | — |
-| Phase 状态机 / gate / Workflow 双模式 | OpenTeams / Archon | Workflow 仅 Phase 3 可选 |
-| 跨引擎互审 | Omnigent Polly | 实现者≠评审者规则 |
-| Workspace 隔离（worktree） | Symphony / Paseo | — |
-| 技术栈（TS/Zod/SQLite/Fastify/pnpm） | Pi / acpx 生态同栈 | 供应链 pin 版本 |
-
-## 附录 C：Skills 配套
-
-`skills/agentteams`（MCP 工具目录与调用顺序）、`skills/agentteams-handoff`（交棒 briefing 模板）、`skills/agentteams-closeout`（收尾结构与 signal 标准）；Phase 2 增补 review/worktree。
+| 本方案的设计问题 | 从哪篇参考中得到启发 | 取了什么、没取什么 |
+|-----------------|--------------------|-------------------|
+| 责任必须有唯一归属，怎么建模？ | clowder-ai / clowder-复用评估 | 取"持球"思想，状态机自研极简版；不取其 Redis 全栈与 persona 体系 |
+| 无人值守怎么防空转？ | clowder-ai | 取"输出必须有收尾动作"思想，协议自定义为三选一 |
+| 执行队列怎么做才够用？ | symphony | 取幂等/重试/并发上限经验；修正其"卡住状态不落盘"缺陷 |
+| 单守护进程 + 时间线同步 | paseo | 取拓扑与 seq 增量同步思路；不取其多端/终端子系统 |
+| 成员与平台的接口怎么收敛？ | mcp-skills 分析 / paseo | 取"MCP 为编排 API"结论 |
+| 多引擎怎么不锁死？ | acpx / paseo / omnigent | 取适配器 + 会话续接键思路；acpx 作现成的广覆盖通道 |
+| 自治等级与复盘沉淀 | opencrew | 取 L0–L3 与 closeout 思想，记忆三件套为自定义 |
+| 阶段做成状态机、门禁做成钩子 | openteams / archon | 取结构思想；不做通用 DAG 平台 |
+| 产出者≠审核者 | omnigent (Polly) | 取规则，落为队规一行 |
+| 默认执行引擎 | pi 分析 | pi --mode rpc 为首发适配器 |
