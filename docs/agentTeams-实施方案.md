@@ -1,6 +1,6 @@
 # agentTeams 实施方案（详细版）
 
-> 版本：v1.0
+> 版本：v1.1（phase 由平台枚举升级为 Charter 定义的轻量状态机）
 > 日期：2026-07-05
 > 状态：实施规划稿，基于 `docs/` 内全部 15 篇文档（草案 + 12 个参考项目分析 + 横向对比矩阵 + clowder 复用评估）收敛
 > 上游：[myteams-草案.md](./myteams-草案.md)（产品意图）、[横向对比矩阵.md](./横向对比矩阵.md)（选型依据）、[clowder-复用评估.md](./clowder-复用评估.md)（复用边界）
@@ -19,6 +19,7 @@
 | 存储 | **SQLite 单文件优先**（better-sqlite3），预留 adapter 接口 | 本地优先、无 Redis 运维；clowder-复用评估 §4.2 结论 |
 | 执行引擎 | **EngineAdapter 注册表**，首发 `pi`（RPC）+ `acpx`（ACP 兜底 20+ agent） | 横向对比矩阵 §11、§13；Harness 中立 |
 | 协作模型 | **三平面**：策略平面（TeamCharter）/ 协作平面（Thread + 可选 WorkflowRun）/ 执行平面（Delivery + EngineAdapter） | 横向对比矩阵 §13 推荐分层 |
+| Phase 模型 | **Charter 定义的轻量状态机**（段数/名称/回退/循环均队级自定义），「头脑风暴→定案→实施」仅为模板默认值 | 草案 §4「同一节奏、不同诠释」的彻底化 |
 | 球权/责任 | 裁剪版 custody 状态机：**5 态 × 8 事件**，表驱动纯函数 + 穷举测试 | clowder-复用评估 §4.1（MIT 裁剪复用） |
 | @ 路由 | 自研 `mentions.ts`（行首 @、代码块剥离、深度上限），测试用例对齐 Clowder | clowder-复用评估 §4.3 |
 | route-serial | **自研短实现（300–600 行）**，禁止 fork Clowder 3657 行版本 | clowder-复用评估 §4.4 |
@@ -33,7 +34,7 @@
 ### 1.1 目标（来自草案，工程化表述）
 
 1. **Team 是一等持久对象**：有身份、成员、章程、记忆、历史；跨多个作品/项目长期存在。
-2. **每支队自定义三阶段工作方式**（头脑风暴 → 确定方案 → 实施），平台只提供阶段容器与门禁钩子，不硬编码流程。
+2. **每支队自定义工作方式**：phase 结构（段数、名称、顺序、回退、循环）完全由队级 Charter 定义，平台只提供阶段容器、迁移事件与门禁钩子，不硬编码任何流程；「头脑风暴 → 确定方案 → 实施」只是模板的默认三段。
 3. **可见的协作现场**：append-only 时间线 + 阶段视图 + 待拍板升级；人可旁观、插话、拍板。
 4. **自主进化**：收尾沉淀写回团队记忆，下次自动带上惯例；进化在团队层，受自治边界约束。
 5. **Harness 中立**：Pi 为默认引擎之一，但 Member 可配 codex/claude/opencode 等任意引擎。
@@ -56,7 +57,7 @@
 ┌───────────────────────────────────────────────────────────┐
 │ 策略平面（每 Team 自有）                                     │
 │   TeamCharter（章程：自治边界、必须叫人的事项）                │
-│   PhasePlaybook（本队三阶段定义：参与者/产物/完成判据）        │
+│   PhasePlaybook（本队 phase 状态机：段数/参与者/产物/门禁/回退） │
 │   Autonomy L0–L3（借鉴 OpenCrew）                           │
 │   TeamMemory（principles / patterns / scars）               │
 ├───────────────────────────────────────────────────────────┤
@@ -131,7 +132,8 @@ agentteams/
 ```text
 Team 1─N Member
 Team 1─N Project（作品/项目：一部短剧、一个应用）
-Project 1─N Thread（协作现场；每 Thread 归属一个 phase）
+Project 1─N Cycle（可选子周期：第 N 集 / 第 N 章 / 第 N 个迭代，各自走一遍 phase 状态机）
+Project/Cycle 1─N Thread（协作现场；每 Thread 归属一个 phase）
 Thread 1─N Message（append-only）
 Thread 1─1 CustodyProjection（读模型）
 Team 1─1 TeamMemory（文件 + 索引表）
@@ -165,12 +167,29 @@ CREATE TABLE members (
 CREATE TABLE projects (
   id TEXT PRIMARY KEY, team_id TEXT NOT NULL,
   title TEXT NOT NULL,
-  phase TEXT NOT NULL DEFAULT 'brainstorm',  -- brainstorm | plan | execute | done
+  phase TEXT NOT NULL,            -- 自由文本，合法值由 charter.phases 校验（非平台枚举）
   status TEXT NOT NULL DEFAULT 'active'
+);
+
+CREATE TABLE cycles (              -- 可选子周期：循环创作（每集/每章/每迭代各走一遍 phase 状态机）
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+  title TEXT NOT NULL,            -- '第 3 集'
+  phase TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active'
+);
+
+CREATE TABLE phase_events (        -- phase 迁移事件日志（append-only，与 custody_events 同款）
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subject_key TEXT NOT NULL,      -- project_id 或 cycle_id
+  type TEXT NOT NULL,             -- 'phase.advanced' | 'phase.reverted'
+  from_phase TEXT, to_phase TEXT,
+  gate_result_json TEXT,          -- 门禁检查结果（人拍板 / 产物存在 / 谓词）
+  actor_member_id TEXT, created_at INTEGER
 );
 
 CREATE TABLE threads (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+  cycle_id TEXT,                  -- NULL = 直属 project
   title TEXT, phase TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'open'        -- open | blocked | resolved
 );
@@ -220,34 +239,47 @@ CREATE TABLE escalations (
 
 ### 3.3 TeamCharter（章程，策略平面核心）
 
+**Phase = Charter 定义的轻量状态机**：平台不内置任何 phase 枚举；`charter.phases` 是有序数组，每个 phase 自带 `next`（允许回退与循环）与 `gate`（迁移门禁）。段数  2–N 不限；「头脑风暴→定案→实施」仅是 app-dev 模板的默认值。迁移由 MCP `advance_phase` / `revert_phase`（受 gate 约束）或人在 Hub 上触发，一律落 `phase_events`。
+
 ```jsonc
 {
-  "phases": {                      // 本队三阶段的自定义诠释
-    "brainstorm": {
+  "phases": [                      // 有序数组 = 本队自定义的 phase 状态机
+    {
+      "id": "brainstorm",
       "description": "需求澄清、方案备选、风险与边界",
       "participants": ["@pm", "@architect"],
       "artifacts": ["需求摘要", "方案对比"],
-      "exit_criteria": "人或 @pm 确认方案备选 ≥2 且风险已列出"
+      "exit_criteria": "人或 @pm 确认方案备选 ≥2 且风险已列出",
+      "next": ["plan"]
     },
-    "plan": {
+    {
+      "id": "plan",
       "participants": ["@architect", "@pm"],
       "artifacts": ["设计说明", "任务拆分", "验收标准"],
-      "exit_criteria": "escalation: acceptance",   // 定案必须人拍板
-      "gate": "human"
+      "gate": { "type": "human" },               // 定案必须人拍板（escalation: acceptance）
+      "next": ["execute", "brainstorm"]          // 允许回退重风暴
     },
-    "execute": {
+    {
+      "id": "execute",
       "participants": ["@builder", "@reviewer"],
       "artifacts": ["PR", "测试报告"],
-      "rules": ["builder 与 reviewer 不得为同一 member（跨引擎优先）"]
-    }
+      "rules": ["builder 与 reviewer 不得为同一 member（跨引擎优先）"],
+      "gate": { "type": "artifact-exists", "artifacts": ["PR"] },
+      "next": ["done", "plan"]                   // 验收不过可退回 plan
+    },
+    { "id": "done", "terminal": true }
+  ],
+  "cycles": {                      // 循环创作队（短剧/小说）可开启：每个 Cycle 独立走一遍 phases
+    "enabled": false,
+    "unit": "集"                   // '集' | '章' | '迭代'
   },
   "autonomy": {                    // OpenCrew L0–L3
     "default": "L2",               // 可回滚操作自主
     "L3_requires_human": ["对外发布", "删除数据", "合并到 main"]
   },
   "evolution": {                   // 进化边界（草案 §11 问题 2）
-    "self_editable": ["memory/*", "phases.*.description", "phases.*.artifacts"],
-    "human_approval": ["autonomy.*", "phases.*.gate", "members"]
+    "self_editable": ["memory/*", "phases[*].description", "phases[*].artifacts", "phases[*].exit_criteria"],
+    "human_approval": ["autonomy.*", "phases[*].gate", "phases[*].next", "phases 增删", "members"]
   },
   "max_a2a_depth": 10
 }
@@ -385,6 +417,7 @@ Hub 内置 MCP Server（Streamable HTTP + per-invocation token）：
 | `hold_thread` | 等外部条件：`{ wakeAfterMs }` 或 `{ wakeWhen: { command } }`（Clowder hold_ball 2a/2c 子集） |
 | `escalate` | 生成 Decision Packet 请人拍板 |
 | `read_memory` / `search_memory` | 读团队记忆 |
+| `advance_phase` / `revert_phase` | 按 charter.phases[*].next 迁移 phase；gate 不满足时拒绝并提示缺口（human gate 自动转 escalation） |
 | `close_out` | 结构化收尾（见 4.8） |
 | `list_threads` / `cross_post` | 跨 thread 协作（Phase 2） |
 
@@ -432,6 +465,7 @@ WebSocket 推送时间线增量（seq 去重，Paseo timeline 双轨同步模式
 | 0.2 | `shared`：全部 Zod schema + SQLite migration | schema 快照测试 |
 | 0.3 | `custody`：状态机 + 穷举测试 + ingest/projector | 40 组合矩阵全绿 |
 | 0.4 | `router/mentions`：解析器 + Clowder 对齐用例 | 行首/代码块/自@/深度用例全绿 |
+| 0.5 | phase 状态机：charter.phases 校验 + advance/revert + gate 钩子（human / artifact-exists）+ phase_events | 非法迁移拒绝、回退/循环用例全绿 |
 
 ### Phase 1：一支队走完三段（约 3–4 周，对应草案 §10）
 
@@ -439,20 +473,20 @@ WebSocket 推送时间线增量（seq 去重，Paseo timeline 双轨同步模式
 |---|------|------|
 | 1.1 | `engines`：pi-rpc 适配器（invoke + session 续接 + abort） | 真实 pi 跑通单次 invoke 集成测试 |
 | 1.2 | `delivery`：队列 + worker + 重试 + blocked 持久化 | 并发/重试/崩溃恢复测试 |
-| 1.3 | `hub`：Team/Project/Thread CRUD + route-serial + MCP server（get_thread/post_message/post_artifact/hold_thread/escalate/close_out） | 两个 mock member A2A 链跑通 |
+| 1.3 | `hub`：Team/Project/Thread CRUD + route-serial + MCP server（get_thread/post_message/post_artifact/hold_thread/escalate/close_out/advance_phase/revert_phase） | 两个 mock member A2A 链跑通 |
 | 1.4 | app-dev Team 模板（charter + 3 member 岗位 prompt：@pm/@builder/@reviewer） | `agentteams team create --template app-dev` |
 | 1.5 | `memory`：closeout → distill → 注入 | 第二次同类任务 prompt 含上次沉淀（黄金用例） |
 | 1.6 | `ui`：队列表 / thread 时间线 / 拍板箱 | 人工走查 |
 | 1.7 | `cli`：init/create/post/ui | — |
 | 1.8 | **端到端验证**：给 app-dev 队一个真实小需求，完整走 brainstorm → plan（人拍板）→ execute（builder 写码 + reviewer 互审）→ closeout | 产出可运行交付物 + 记忆写回 |
 
-**Phase 1 明确不做**：第二支队模板、workflow 模式、并行路由、跨 thread、Callback 桥、飞书/Slack。
+**Phase 1 明确不做**：第二支队模板、workflow 模式、并行路由、跨 thread、Callback 桥、飞书/Slack。Cycle（子周期）机制 schema 先行落地，UI/流程支持随 Phase 2 循环创作队模板一起交付。
 
 ### Phase 2：多引擎 + 第二支队（约 2–3 周）
 
 - 2.1 `acpx` 适配器（覆盖 codex/claude/…），builder 与 reviewer 跨引擎互审规则生效
 - 2.2 并行路由模式（brainstorm 阶段多成员同题发散）
-- 2.3 **短剧队或小说队模板**（验证「同平台、异工作方式」——charter 不同即工作方式不同，平台零改动为验收标准）
+- 2.3 **短剧队或小说队模板**（验证「同平台、异工作方式」：charter 不同即工作方式不同——含不同段数与 Cycle 循环，平台零改动为验收标准）+ Cycle UI/流程支持
 - 2.4 跨 thread 工具（list_threads / cross_post）
 - 2.5 custody 扩展态评估（是否加 parked）
 
