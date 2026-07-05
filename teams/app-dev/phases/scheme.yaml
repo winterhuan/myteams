@@ -1,0 +1,15 @@
+artifacts:
+  - id: design
+    label: 设计说明
+    path: missions/{missionId}/design.md
+  - id: acceptance
+    label: 验收标准
+    path: missions/{missionId}/acceptance.md
+
+gate:
+  type: human_approval
+  approver: human
+  requiredArtifacts: [design, acceptance]
+  exitCriteria:
+    - 架构决策记入 Ledger
+    - 委托人批准后方可进入 delivery

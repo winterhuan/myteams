@@ -1,0 +1,13 @@
+artifacts:
+  - id: pitch-pool
+    label: 选题池
+  - id: character-sheets
+    label: 人物小传
+  - id: episode-hooks
+    label: 分集钩子
+
+gate:
+  type: team_consensus
+  exitCriteria:
+    - 至少 3 个选题进入候选
+    - 核心人物关系已登记

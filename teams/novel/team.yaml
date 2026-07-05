@@ -1,0 +1,64 @@
+id: novel
+name: 小说创作队
+domain: fiction
+description: 长篇叙事编队，强调世界观、伏笔与文风连贯。
+defaultMode: thread
+hubLayout: chapter-tree
+
+phases:
+  - id: brainstorm
+    label: 头脑风暴
+    description: 世界观、主线、人物弧；发散与收敛交替
+    defaultMode: thread
+    config: phases/brainstorm.yaml
+  - id: scheme
+    label: 确定方案
+    description: 卷章结构、POV、伏笔表、文风规范
+    defaultMode: thread
+    config: phases/scheme.yaml
+  - id: delivery
+    label: 实施
+    description: 分章写作、互审连贯性、修订定稿
+    defaultMode: thread
+    config: phases/delivery.yaml
+
+members:
+  - id: author
+    kind: agent
+    role: 主笔
+    handle: "@author"
+    harness:
+      engine: pi
+    persona: members/author.md
+    autonomy: L2
+  - id: worldbuilder
+    kind: agent
+    role: 世界观架构
+    handle: "@worldbuilder"
+    harness:
+      engine: pi
+    persona: members/worldbuilder.md
+    autonomy: L2
+  - id: continuity
+    kind: agent
+    role: 连贯性编辑
+    handle: "@continuity"
+    harness:
+      engine: pi
+    persona: members/continuity.md
+    autonomy: L1
+  - id: line-editor
+    kind: agent
+    role: 文风编辑
+    handle: "@line-editor"
+    harness:
+      engine: pi
+    persona: members/line-editor.md
+    autonomy: L1
+  - id: human
+    kind: human
+    role: 委托人
+    handle: "@human"
+    autonomy: L3
+
+charter: charter.md

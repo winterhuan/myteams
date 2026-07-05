@@ -1,0 +1,13 @@
+artifacts:
+  - id: requirements
+    label: 需求摘要
+    path: missions/{missionId}/requirements.md
+  - id: options
+    label: 方案对比
+    path: missions/{missionId}/options.md
+
+gate:
+  type: team_consensus
+  exitCriteria:
+    - 需求边界已写入 Ledger
+    - 至少 2 个方案备选已登记

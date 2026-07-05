@@ -1,0 +1,16 @@
+{
+  "name": "@agentteams/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "teams": "./src/main.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@agentteams/core": "workspace:*",
+    "@agentteams/harness": "workspace:*"
+  }
+}

@@ -1,0 +1,13 @@
+artifacts:
+  - id: world-notes
+    label: 设定笔记
+  - id: plot-options
+    label: 情节备选
+  - id: character-relations
+    label: 人物关系
+
+gate:
+  type: team_consensus
+  exitCriteria:
+    - 世界观边界已明确
+    - 主线方向至少 2 版备选

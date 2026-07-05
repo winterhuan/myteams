@@ -1,0 +1,65 @@
+id: app-dev
+name: 应用开发队
+domain: software
+description: 从需求到可运行交付物的软件编队，擅长 brainstorm → 架构定案 → 实现验证。
+defaultMode: hybrid
+hubLayout: dev-dashboard
+
+phases:
+  - id: brainstorm
+    label: 头脑风暴
+    description: 澄清需求、列举方案备选、识别风险与边界
+    defaultMode: thread
+    config: phases/brainstorm.yaml
+  - id: scheme
+    label: 确定方案
+    description: 架构与接口定案、任务拆分、验收标准与人批门禁
+    defaultMode: thread
+    config: phases/scheme.yaml
+  - id: delivery
+    label: 实施
+    description: 实现、交叉 Review、集成验证与交付
+    defaultMode: workflow
+    config: phases/delivery.yaml
+
+members:
+  - id: lead
+    kind: agent
+    role: 技术负责人
+    handle: "@lead"
+    harness:
+      engine: pi
+      model: claude-sonnet-4
+    persona: members/lead.md
+    autonomy: L2
+  - id: architect
+    kind: agent
+    role: 架构师
+    handle: "@architect"
+    harness:
+      engine: pi
+    persona: members/architect.md
+    autonomy: L2
+  - id: builder
+    kind: agent
+    role: 构建者
+    handle: "@builder"
+    harness:
+      engine: pi
+    persona: members/builder.md
+    autonomy: L1
+  - id: reviewer
+    kind: agent
+    role: 审查者
+    handle: "@reviewer"
+    harness:
+      engine: pi
+    persona: members/reviewer.md
+    autonomy: L1
+  - id: human
+    kind: human
+    role: 委托人
+    handle: "@human"
+    autonomy: L3
+
+charter: charter.md

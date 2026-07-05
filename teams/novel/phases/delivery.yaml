@@ -1,0 +1,11 @@
+artifacts:
+  - id: chapters
+    label: 章节稿
+  - id: revision-log
+    label: 修订记录
+
+gate:
+  type: acceptance
+  exitCriteria:
+    - 连贯性编辑通过
+    - 文风编辑通过
